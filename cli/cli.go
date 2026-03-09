@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -124,6 +125,11 @@ type model struct {
 	prefix     bool // true after Ctrl+X, waiting for second key
 	debugMode  bool
 	debugLast  string
+	statusMsg  string
+	exportMode bool
+	exportOn   bool
+	exportPath string
+	exportIn   textinput.Model
 	pendingTxBS    int
 	autoReconnect bool
 	reconnectWait bool
@@ -626,6 +632,10 @@ func (m model) openTerminal() (model, tea.Cmd) {
 
 	m.vp = viewport.New(m.width, 1)
 	m.resizeTerminal()
+	m.exportMode = false
+	m.exportOn = false
+	m.exportPath = ""
+	m.statusMsg = ""
 
 	go func() {
 		buf := make([]byte, 1024)
@@ -653,6 +663,7 @@ func (m *model) resizeTerminal() {
 	m.vp.Width = m.width
 	m.vp.Height = vpH
 	m.input.Width = m.width - 4
+	m.exportIn.Width = m.width - 10
 	m.vp.SetContent(m.output)
 }
 
@@ -688,6 +699,10 @@ func (m model) updateTerminal(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 
+		if m.exportMode {
+			return m.handleExportKey(msg)
+		}
+
 		if m.prefix {
 			return m.handleChord(key)
 		}
@@ -705,7 +720,11 @@ func (m model) updateTerminal(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var tiCmd tea.Cmd
-	m.input, tiCmd = m.input.Update(msg)
+	if m.exportMode {
+		m.exportIn, tiCmd = m.exportIn.Update(msg)
+	} else {
+		m.input, tiCmd = m.input.Update(msg)
+	}
 	cmds = append(cmds, tiCmd)
 
 	return m, tea.Batch(cmds...)
@@ -832,6 +851,13 @@ func (m *model) handleCSI(final byte, seq []byte) {
 	case 'm':
 		// Keep SGR color/style sequences.
 		m.currentSGR = string(seq)
+	case 'G':
+		// Cursor horizontal absolute (1-based).
+		col := parseCSIInt(params, 1) - 1
+		if col < 0 {
+			col = 0
+		}
+		m.termCol = col
 	case 'D':
 		// Cursor backward (left)
 		n := parseCSIInt(params, 1)
@@ -852,9 +878,17 @@ func (m *model) handleCSI(final byte, seq []byte) {
 		// Cursor forward (right)
 		n := parseCSIInt(params, 1)
 		m.termCol += n
+	case 'X':
+		// Erase chars (blank, no shift)
+		m.eraseCharsAtCursor(parseCSIInt(params, 1))
 	case 'K':
 		// Erase in line
 		m.eraseInLine(parseCSIInt(params, 0))
+	case 'J':
+		// Erase in display.
+		// Zephyr line-edit redraws can use this; for our single-cursor model,
+		// treating it as line-tail clear avoids stale command suffixes.
+		m.eraseInDisplay(parseCSIInt(params, 0))
 	case 'P':
 		// Delete chars at cursor (shift left)
 		m.deleteCharsAtCursor(parseCSIInt(params, 1))
@@ -863,10 +897,7 @@ func (m *model) handleCSI(final byte, seq []byte) {
 		}
 	}
 	if m.debugMode {
-		switch final {
-		case 'D', 'C', 'K', 'P':
-			m.debugLast = fmt.Sprintf("RX: CSI %s %c", params, final)
-		}
+		m.debugLast = fmt.Sprintf("RX: CSI %s %c", params, final)
 	}
 }
 
@@ -969,6 +1000,51 @@ func (m *model) eraseInLine(mode int) {
 	m.termLines[last] = line
 }
 
+func (m *model) eraseCharsAtCursor(n int) {
+	if n <= 0 || len(m.termLines) == 0 {
+		return
+	}
+	last := len(m.termLines) - 1
+	line := m.termLines[last]
+	if m.termCol < 0 {
+		m.termCol = 0
+	}
+	if m.termCol >= len(line.plain) {
+		return
+	}
+
+	end := m.termCol + n
+	if end > len(line.plain) {
+		end = len(line.plain)
+	}
+	for i := m.termCol; i < end; i++ {
+		line.plain[i] = ' '
+		if i < len(line.styles) {
+			line.styles[i] = m.currentSGR
+		}
+	}
+	m.termLines[last] = line
+}
+
+func (m *model) eraseInDisplay(mode int) {
+	if len(m.termLines) == 0 {
+		return
+	}
+	switch mode {
+	case 2:
+		// Entire screen: reset viewport buffer to a fresh line.
+		// This matches user expectation for `clear` in our simplified model.
+		m.termLines = []termLine{{}}
+		m.termCol = 0
+	case 1:
+		// Start to cursor. Approximate for current line; keep prior lines unchanged.
+		m.eraseInLine(1)
+	default:
+		// Cursor to end of display. Approximate to current line tail.
+		m.eraseInLine(0)
+	}
+}
+
 func (m *model) deleteCharsAtCursor(n int) {
 	if n <= 0 || len(m.termLines) == 0 {
 		return
@@ -1020,6 +1096,43 @@ func renderTermLines(lines []termLine) string {
 	return out.String()
 }
 
+func renderPlainTermLines(lines []termLine) string {
+	var out strings.Builder
+	for i, line := range lines {
+		out.WriteString(string(line.plain))
+		if i < len(lines)-1 {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
+func (m model) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "escape":
+		m.exportMode = false
+		m.exportIn.Blur()
+		m.statusMsg = "export cancelled"
+		return m, nil
+	case "enter":
+		path := strings.TrimSpace(m.exportIn.Value())
+		if path == "" {
+			m.statusMsg = "export failed: empty path"
+			return m, nil
+		}
+		m.exportPath = path
+		m.exportOn = true
+		m.exportMode = false
+		m.exportIn.Blur()
+		m.statusMsg = "exporting to " + path + " (C-x x to save/disable)"
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.exportIn, cmd = m.exportIn.Update(msg)
+	return m, cmd
+}
+
 func (m model) handleChord(key string) (tea.Model, tea.Cmd) {
 	// Exit command mode by default; specific keys can keep it active.
 	m.prefix = false
@@ -1061,6 +1174,29 @@ func (m model) handleChord(key string) (tea.Model, tea.Cmd) {
 		} else {
 			m.debugLast = "debug OFF"
 		}
+		m.statusMsg = ""
+		return m, nil
+	case "x":
+		if m.exportOn {
+			content := renderPlainTermLines(m.termLines)
+			if err := os.WriteFile(m.exportPath, []byte(content), 0644); err != nil {
+				m.statusMsg = "export failed: " + err.Error()
+				return m, nil
+			}
+			m.exportOn = false
+			m.statusMsg = "export saved to " + m.exportPath
+			m.exportPath = ""
+			return m, nil
+		}
+		m.exportMode = true
+		ei := textinput.New()
+		ei.Placeholder = "./session.txt"
+		ei.CharLimit = 1024
+		ei.Focus()
+		ei.SetValue("")
+		m.exportIn = ei
+		m.exportIn.Width = m.width - 10
+		m.statusMsg = ""
 		return m, nil
 	case "up":
 		m.prefix = true
@@ -1085,6 +1221,10 @@ func (m model) disconnectToSelection() (tea.Model, tea.Cmd) {
 	m.output = ""
 	m.termLines = nil
 	m.termCol = 0
+	m.statusMsg = ""
+	m.exportMode = false
+	m.exportOn = false
+	m.exportPath = ""
 	m.escSeen = false
 	m.csiMode = false
 	m.csiBuf = nil
@@ -1285,6 +1425,12 @@ var (
 			Background(lipgloss.Color("196")).
 			Padding(0, 1)
 
+	exportOnStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("129")).
+			Padding(0, 1)
+
 	reconOnStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("15")).
@@ -1307,23 +1453,29 @@ func (m model) viewTerminal() string {
 	if m.autoReconnect {
 		reconTag = reconOnStyle.Render("RECON ON")
 	}
+	exportTag := ""
+	if m.exportOn {
+		exportTag = exportOnStyle.Render("EXPORT ON")
+	}
 	info := fmt.Sprintf(" sergo — %s @ %d ", m.portName, m.baudRate)
-	titleWidth := m.width - lipgloss.Width(modeTag) - lipgloss.Width(reconTag)
+	titleWidth := m.width - lipgloss.Width(modeTag) - lipgloss.Width(reconTag) - lipgloss.Width(exportTag)
 	if titleWidth < 0 {
 		titleWidth = 0
 	}
 	bar := titleStyle.Width(titleWidth).Render(info)
-	topLine := bar + modeTag + reconTag
+	topLine := bar + modeTag + reconTag + exportTag
 
 	sep := borderStyle.Render(strings.Repeat("─", m.width))
 
 	inputLine := ""
-	if m.prefix {
+	if m.exportMode {
+		inputLine = inputLabel.Render("export ❯ ") + m.exportIn.View()
+	} else if m.prefix {
 		rc := "reconnect:on"
 		if !m.autoReconnect {
 			rc = "reconnect:off"
 		}
-		inputLine = inputLabel.Render("C-x ") + dimStyle.Render("q quit  c disconnect  t toggle mode  r "+rc+"  ↑/↓ scroll  esc exit")
+		inputLine = inputLabel.Render("C-x ") + dimStyle.Render("q quit  c disconnect  t toggle mode  r "+rc+"  x export on/off  ↑/↓ scroll  esc exit")
 	} else if m.directMode {
 		inputLine = dimStyle.Render("  keys -> serial")
 	} else {
@@ -1331,8 +1483,10 @@ func (m model) viewTerminal() string {
 	}
 
 	var hints string
-	if m.prefix {
-		hints = hintStyle.Render("C-x mode: q quit  c disconnect  t toggle mode  r reconnect on/off  f end  d debug  ↑/↓ scroll  esc exit")
+	if m.exportMode {
+		hints = hintStyle.Render("enter save  esc cancel  (plain file name saves to current directory)")
+	} else if m.prefix {
+		hints = hintStyle.Render("C-x mode: q quit  c disconnect  t toggle mode  r reconnect on/off  x export on/off  f end  d debug  ↑/↓ scroll  esc exit")
 	} else if m.directMode {
 		hints = hintStyle.Render("C-x commands  pgup/pgdn scroll")
 	} else {
@@ -1346,6 +1500,10 @@ func (m model) viewTerminal() string {
 		}
 	} else if m.debugMode && m.debugLast != "" {
 		hints = hintStyle.Render("DBG " + m.debugLast)
+	} else if m.exportOn {
+		hints = hintStyle.Render("exporting to " + m.exportPath + "  (C-x x to save/disable)")
+	} else if m.statusMsg != "" {
+		hints = hintStyle.Render(m.statusMsg)
 	}
 	pad := m.width - lipgloss.Width(hints)
 	if pad < 0 {
