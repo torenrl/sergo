@@ -14,11 +14,11 @@ import (
 
 	"gnist/sergo/serial"
 
-	"go.bug.st/serial/enumerator"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"go.bug.st/serial/enumerator"
 )
 
 var (
@@ -106,31 +106,31 @@ type model struct {
 	portName string
 	baudRate int
 
-	port       *serial.Port
-	vp         viewport.Model
-	input      textinput.Model
-	output     string
-	termLines  []termLine
-	termCol    int
-	escSeen    bool
-	csiMode    bool
-	csiBuf     []byte
-	oscMode    bool
-	oscEscSeen bool
-	currentSGR string
-	history    []string
-	histIdx    int
-	serialCh   chan string
-	directMode bool
-	prefix     bool // true after Ctrl+X, waiting for second key
-	debugMode  bool
-	debugLast  string
-	statusMsg  string
-	exportMode bool
-	exportOn   bool
-	exportPath string
-	exportIn   textinput.Model
-	pendingTxBS    int
+	port          *serial.Port
+	vp            viewport.Model
+	input         textinput.Model
+	output        string
+	termLines     []termLine
+	termCol       int
+	escSeen       bool
+	csiMode       bool
+	csiBuf        []byte
+	oscMode       bool
+	oscEscSeen    bool
+	currentSGR    string
+	history       []string
+	histIdx       int
+	serialCh      chan string
+	directMode    bool
+	prefix        bool // true after Ctrl+X, waiting for second key
+	debugMode     bool
+	debugLast     string
+	statusMsg     string
+	exportMode    bool
+	exportOn      bool
+	exportPath    string
+	exportIn      textinput.Model
+	pendingTxBS   int
 	autoReconnect bool
 	reconnectWait bool
 	reconnectErr  string
@@ -1239,14 +1239,14 @@ func (m model) disconnectToSelection() (tea.Model, tea.Cmd) {
 }
 
 var ansiKeyMap = map[string][]byte{
-	"up":    {0x1b, '[', 'A'},
-	"down":  {0x1b, '[', 'B'},
-	"right": {0x1b, '[', 'C'},
-	"left":  {0x1b, '[', 'D'},
-	"home":  {0x1b, '[', 'H'},
-	"end":   {0x1b, '[', 'F'},
-	"tab":   {'\t'},
-	"enter": {'\r'},
+	"up":        {0x1b, '[', 'A'},
+	"down":      {0x1b, '[', 'B'},
+	"right":     {0x1b, '[', 'C'},
+	"left":      {0x1b, '[', 'D'},
+	"home":      {0x1b, '[', 'H'},
+	"end":       {0x1b, '[', 'F'},
+	"tab":       {'\t'},
+	"enter":     {'\r'},
 	"backspace": {0x08},
 	"delete":    {0x1b, '[', '3', '~'},
 	"escape":    {0x1b},
@@ -1484,7 +1484,7 @@ func (m model) viewTerminal() string {
 
 	var hints string
 	if m.exportMode {
-		hints = hintStyle.Render("enter save  esc cancel  (plain file name saves to current directory)")
+		hints = hintStyle.Render("enter start export  esc cancel  (plain file name saves to current directory)")
 	} else if m.prefix {
 		hints = hintStyle.Render("C-x mode: q quit  c disconnect  t toggle mode  r reconnect on/off  x export on/off  f end  d debug  ↑/↓ scroll  esc exit")
 	} else if m.directMode {
