@@ -270,6 +270,9 @@ func (m model) updateSelection(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.phase == phasePort {
+			if len(m.ports) == 0 {
+				return m, nil
+			}
 			m.portName = m.ports[m.cursor].raw
 			m.phase = phaseBaud
 			m.cursor = defaultBaudIdx(m.bauds)
@@ -324,6 +327,8 @@ func tryReconnectCmd(portName string, baud int) tea.Cmd {
 
 func (m *model) applyRefreshedPorts(newPorts []portOption) {
 	if len(newPorts) == 0 {
+		m.ports = nil
+		m.cursor = 0
 		return
 	}
 	currentRaw := ""
@@ -1527,9 +1532,6 @@ func Run() error {
 	ports, err := serial.ListPorts()
 	if err != nil {
 		return err
-	}
-	if len(ports) == 0 {
-		return fmt.Errorf("no serial ports found")
 	}
 
 	p := tea.NewProgram(initialModel(buildPortOptions(ports)), tea.WithAltScreen())
